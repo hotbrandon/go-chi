@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/hotbrandon/go-chi/internal/cryptocurrency"
 )
 
 type config struct {
@@ -32,6 +33,10 @@ func (app *application) mount() http.Handler {
 		w.Write([]byte("ok"))
 	})
 
+	cryptoService := cryptocurrency.NewCryptoService()
+	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoService)
+
+	r.Get("/crypto/transactions", cryptoHandler.GetTransactions)
 	return r
 }
 
