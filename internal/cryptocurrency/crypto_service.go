@@ -7,6 +7,7 @@ type ICryptoService interface {
 }
 
 type CryptoService struct {
+	// repository
 }
 
 func NewCryptoService() *CryptoService {
@@ -14,5 +15,11 @@ func NewCryptoService() *CryptoService {
 }
 
 func (c *CryptoService) GetTransactions(ctx context.Context) error {
+	// query := "SELECT * FROM transactions"
+	// _, err := db.QueryContext(ctx, query)
+	// if err != nil {
+	// 	return err
+	// }
+
 	return nil
 }

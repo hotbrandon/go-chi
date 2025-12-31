@@ -10,8 +10,10 @@ import (
 	"github.com/hotbrandon/go-chi/internal/cryptocurrency"
 )
 
+type database_id string
 type config struct {
-	app_addr string
+	app_addr   string
+	oracle_dsn map[database_id]string
 }
 
 type application struct {
