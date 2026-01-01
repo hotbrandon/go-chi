@@ -4,22 +4,24 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+
+	"github.com/hotbrandon/go-chi/internal/repo"
 )
 
 type CryptoHandler struct {
-	svc ICryptoService
+	repo *repo.Repository
 }
 
-func NewCryptoHandler(svc ICryptoService) *CryptoHandler {
+func NewCryptoHandler(repo *repo.Repository) *CryptoHandler {
 	return &CryptoHandler{
-		svc,
+		repo,
 	}
 }
 
-func (h *CryptoHandler) GetTransactions(w http.ResponseWriter, r *http.Request) {
-	transactions, err := h.svc.ListTransactions(r.Context())
+func (h *CryptoHandler) ListTransactions(w http.ResponseWriter, r *http.Request) {
+	transactions, err := h.repo.ListTransactions(r.Context())
 	if err != nil {
-		slog.Error("GetTransactions", "error", err.Error())
+		slog.Error("ListTransactions", "error", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
