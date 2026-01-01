@@ -1,25 +1,32 @@
 package cryptocurrency
 
-import "context"
+import (
+	"context"
+
+	"github.com/hotbrandon/go-chi/internal/repository"
+)
 
 type ICryptoService interface {
-	GetTransactions(ctx context.Context) error
+	ListTransactions(ctx context.Context) ([]repository.Transaction, error)
 }
 
 type CryptoService struct {
 	// repository
+	repo repository.Querier
 }
 
-func NewCryptoService() *CryptoService {
-	return &CryptoService{}
+func NewCryptoService(repo repository.Querier) *CryptoService {
+	return &CryptoService{
+		repo: repo,
+	}
 }
 
-func (c *CryptoService) GetTransactions(ctx context.Context) error {
+func (c *CryptoService) ListTransactions(ctx context.Context) ([]repository.Transaction, error) {
 	// query := "SELECT * FROM transactions"
 	// _, err := db.QueryContext(ctx, query)
 	// if err != nil {
 	// 	return err
 	// }
 
-	return nil
+	return c.repo.ListTransactions(ctx)
 }

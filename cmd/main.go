@@ -30,6 +30,7 @@ func main() {
 				"lab_dsn": os.Getenv("LAB_DSN"),
 			},
 		},
+		db: make(map[database_id]*sql.DB),
 	}
 
 	lab_db, err := sql.Open("oracle", app.cfg.oracle_dsn["lab_dsn"])
@@ -42,6 +43,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer lab_db.Close()
+
+	app.db["lab_db"] = lab_db
 
 	if err := app.serve(); err != nil {
 		slog.Error("failed to start server", "error", err)

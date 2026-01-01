@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"time"
@@ -8,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/hotbrandon/go-chi/internal/cryptocurrency"
+	"github.com/hotbrandon/go-chi/internal/repository"
 )
 
 type database_id string
@@ -18,6 +20,7 @@ type config struct {
 
 type application struct {
 	cfg config
+	db  map[database_id]*sql.DB
 }
 
 func (app *application) mount() http.Handler {
@@ -35,7 +38,7 @@ func (app *application) mount() http.Handler {
 		w.Write([]byte("ok"))
 	})
 
-	cryptoService := cryptocurrency.NewCryptoService()
+	cryptoService := cryptocurrency.NewCryptoService(repository.New(app.db["lab_db"]))
 	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoService)
 
 	r.Get("/crypto/transactions", cryptoHandler.GetTransactions)
