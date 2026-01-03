@@ -33,6 +33,7 @@ func (app *application) mount() http.Handler {
 	r.Route("/crypto", func(r chi.Router) {
 		r.Use(app.requireOracleDb)
 		r.Get("/transactions", cryptoHandler.ListTransactions)
+		r.Post("/transactions", cryptoHandler.CreateTransaction)
 	})
 	//
 	return r

@@ -106,7 +106,7 @@ func openDatabase(driver, dsn, databaseId string, required bool) (*sql.DB, error
 
 	var db *sql.DB
 	var err error
-
+	databaseId = strings.ToUpper(databaseId)
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		db, err = sql.Open(driver, dsn)
 		if err != nil {
