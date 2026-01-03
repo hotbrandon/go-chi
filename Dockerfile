@@ -27,7 +27,7 @@ RUN apk --no-cache add curl
 COPY --from=builder /app/api .
 
 # Expose the application port
-EXPOSE 8091
+EXPOSE 8100
 
 # Run the application
 CMD ["./api"]
