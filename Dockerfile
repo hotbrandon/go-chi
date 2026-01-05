@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
@@ -20,8 +20,11 @@ FROM alpine:latest
 
 WORKDIR /root/
 
-# Install curl for health check
-RUN apk --no-cache add curl
+# Install curl for health check and tzdata
+RUN apk --no-cache add curl tzdata
+
+# Set timezone
+ENV TZ=Asia/Taipei
 
 # Copy the binary from the builder stage
 COPY --from=builder /app/api .
