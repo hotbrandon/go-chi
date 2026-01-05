@@ -239,60 +239,29 @@ func loadDatabaseConfigs() map[string]DatabaseConfig {
 // }
 
 func openDatabase(driver, dsn, databaseId string) (*sql.DB, error) {
-	const maxRetries = 3
-	const retryDelay = 2 * time.Second
-
-	var db *sql.DB
-	var err error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		db, err = sql.Open(driver, dsn)
-		if err != nil {
-			slog.Warn("failed to open database",
-				"database", databaseId,
-				"attempt", attempt,
-				"error", err)
-
-			if attempt < maxRetries {
-				time.Sleep(retryDelay)
-				continue
-			}
-			return nil, err
-		}
-
-		// Configure connection pool for production
-		db.SetMaxOpenConns(25)                 // Max concurrent connections
-		db.SetMaxIdleConns(5)                  // Idle connections to keep
-		db.SetConnMaxLifetime(5 * time.Minute) // Recycle connections
-		db.SetConnMaxIdleTime(2 * time.Minute) // Close idle connections
-
-		// Verify connection
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		err = db.PingContext(ctx)
-		if err != nil {
-			slog.Warn("failed to ping database",
-				"database", databaseId,
-				"attempt", attempt,
-				"error", err)
-
-			db.Close()
-
-			if attempt < maxRetries {
-				time.Sleep(retryDelay)
-				continue
-			}
-			return nil, err
-		}
-
-		slog.Info("database connection verified",
-			"database", databaseId,
-			"attempt", attempt)
-		return db, nil
+	db, err := sql.Open(driver, dsn)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, err
+	// Configure connection pool for production
+	db.SetMaxOpenConns(25)                 // Max concurrent connections
+	db.SetMaxIdleConns(5)                  // Idle connections to keep
+	db.SetConnMaxLifetime(5 * time.Minute) // Recycle connections
+	db.SetConnMaxIdleTime(2 * time.Minute) // Close idle connections
+
+	// Verify connection
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = db.PingContext(ctx)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	slog.Info("database connection verified", "database", databaseId)
+	return db, nil
 }
 
 // Add lazy connection method
