@@ -3,285 +3,247 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"encoding/json"
 	"log/slog"
-	"os"
-	"strconv"
+	"net/http"
 	"strings"
 	"time"
 
-	"github.com/joho/godotenv"
-	_ "github.com/sijms/go-ora/v2"
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	cryptocurrency "github.com/hotbrandon/go-chi/internal/crypto"
+	"github.com/hotbrandon/go-chi/internal/repo"
 )
 
-// DatabaseConfig holds configuration for a single database
-type DatabaseConfig struct {
-	ID       string
-	Host     string
-	Port     int
-	SID      string
-	User     string
-	Password string
+type contextKey string
+
+const dbContextKey contextKey = "database"
+const dbIDContextKey contextKey = "database_id"
+
+func (app *application) mount() http.Handler {
+	r := chi.NewRouter()
+
+	// Global middleware
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Logger)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Timeout(60 * time.Second))
+
+	// Health checks (no authentication needed)
+	r.Get("/health", app.healthCheckHandler)
+	r.Get("/health/readiness", app.readinessCheckHandler)
+
+	// List available databases (useful for frontends)
+	r.Get("/databases", app.listDatabasesHandler)
+
+	// API routes - database ID in path
+	r.Route("/api/{database_id}", func(r chi.Router) {
+		r.Use(app.databaseMiddleware)
+
+		// Crypto/transaction endpoints
+		r.Route("/crypto", func(r chi.Router) {
+			r.Get("/transactions", app.listTransactionsHandler)
+			r.Post("/transactions", app.createTransactionHandler)
+			r.Get("/transactions/{id}", app.getTransactionHandler)
+			// Add more as needed
+		})
+
+		// You can add other resource types here
+		// r.Route("/users", func(r chi.Router) { ... })
+		// r.Route("/reports", func(r chi.Router) { ... })
+	})
+
+	return r
 }
 
-// BuildDSN creates a connection string from config
-func (dc DatabaseConfig) BuildDSN() string {
-	// Format: oracle://user:password@host:port/service_name
-	return fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
-		dc.User,
-		dc.Password,
-		dc.Host,
-		dc.Port,
-		dc.SID)
+func (app *application) serve() error {
+	srv := &http.Server{
+		Addr:         app.cfg.appAddr,
+		Handler:      app.mount(),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	slog.Info("server starting",
+		"address", app.cfg.appAddr,
+		"databases", len(app.dbs))
+	return srv.ListenAndServe()
 }
 
-type config struct {
-	appAddr   string
-	databases map[string]DatabaseConfig
+// Health check - simple liveness probe
+func (app *application) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":    "ok",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
-type application struct {
-	cfg config
-	dbs map[string]*sql.DB
+// Readiness check - tests all database connections
+func (app *application) readinessCheckHandler(w http.ResponseWriter, r *http.Request) {
+	type DatabaseHealth struct {
+		ID        string `json:"id"`
+		Available bool   `json:"available"`
+		Latency   string `json:"latency,omitempty"`
+		Error     string `json:"error,omitempty"`
+	}
+
+	type ReadinessResponse struct {
+		Status     string           `json:"status"` // "ready", "degraded", "not_ready"
+		Timestamp  string           `json:"timestamp"`
+		Databases  []DatabaseHealth `json:"databases"`
+		TotalDBs   int              `json:"total_databases"`
+		HealthyDBs int              `json:"healthy_databases"`
+	}
+
+	health := ReadinessResponse{
+		Status:    "ready",
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		TotalDBs:  len(app.dbs),
+	}
+
+	healthyCount := 0
+
+	for dbID, db := range app.dbs {
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		err := db.PingContext(ctx)
+		cancel()
+		latency := time.Since(start)
+
+		dbHealth := DatabaseHealth{
+			ID:        dbID,
+			Available: err == nil,
+		}
+
+		if err == nil {
+			dbHealth.Latency = latency.String()
+			healthyCount++
+		} else {
+			dbHealth.Error = err.Error()
+		}
+
+		health.Databases = append(health.Databases, dbHealth)
+	}
+
+	health.HealthyDBs = healthyCount
+
+	// Determine overall status
+	if healthyCount == 0 {
+		health.Status = "not_ready"
+	} else if healthyCount < len(app.dbs) {
+		health.Status = "degraded"
+	}
+
+	statusCode := http.StatusOK
+	if health.Status == "not_ready" {
+		statusCode = http.StatusServiceUnavailable
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	json.NewEncoder(w).Encode(health)
 }
 
-func main() {
-	_ = godotenv.Load()
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
-
-	appAddrEnv := os.Getenv("APP_ADDR")
-	if appAddrEnv == "" {
-		slog.Error("APP_ADDR environment variable is not set")
-		os.Exit(1)
+// List available databases - useful for frontend to build UI
+func (app *application) listDatabasesHandler(w http.ResponseWriter, r *http.Request) {
+	type DatabaseInfo struct {
+		ID        string `json:"id"`
+		Available bool   `json:"available"`
 	}
 
-	// Load database configurations from environment
-	dbConfigs := loadDatabaseConfigs()
-	if len(dbConfigs) == 0 {
-		slog.Error("no database configurations found")
-		os.Exit(1)
+	databases := make([]DatabaseInfo, 0, len(app.dbs))
+	for dbID := range app.dbs {
+		databases = append(databases, DatabaseInfo{
+			ID:        dbID,
+			Available: true,
+		})
 	}
 
-	app := application{
-		cfg: config{
-			appAddr:   appAddrEnv,
-			databases: dbConfigs,
-		},
-		dbs: make(map[string]*sql.DB),
-	}
-
-	// Connect to all configured databases
-	successCount := 0
-	for dbID, dbConfig := range app.cfg.databases {
-		dsn := dbConfig.BuildDSN()
-		db, err := openDatabase("oracle", dsn, dbID)
-		if err != nil {
-			slog.Error("failed to connect to database",
-				"database_id", dbID,
-				"error", err)
-			// Option 1: Fail completely if any database fails
-			// os.Exit(1)
-
-			// Option 2: Continue with available databases
-			continue
-		}
-		defer db.Close()
-		app.dbs[dbID] = db
-		successCount++
-		slog.Info("database connected successfully",
-			"database_id", dbID,
-			"host", dbConfig.Host,
-			"sid", dbConfig.SID)
-	}
-
-	if successCount == 0 {
-		slog.Error("no databases available, cannot start server")
-		os.Exit(1)
-	}
-
-	slog.Info("database initialization complete",
-		"configured", len(dbConfigs),
-		"connected", successCount)
-
-	if err := app.serve(); err != nil {
-		slog.Error("server failed", "error", err)
-		os.Exit(1)
-	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"databases": databases,
+		"count":     len(databases),
+	})
 }
 
-// loadDatabaseConfigs reads database configurations from environment variables
-// Supports two patterns:
-// 1. Full DSN: ORA_<ID>_DSN=oracle://user:pass@host:port/sid
-// 2. Separate components: ORA_<ID>_HOST, ORA_<ID>_PORT, etc.
-func loadDatabaseConfigs() map[string]DatabaseConfig {
-	configs := make(map[string]DatabaseConfig)
-	foundIDs := make(map[string]bool)
+// Middleware: Inject database connection into request context
+func (app *application) databaseMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		dbID := strings.ToLower(chi.URLParam(r, "database_id"))
 
-	// First pass: find all database IDs
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-
-		// Look for ORA_* variables
-		if strings.HasPrefix(key, "ORA_") {
-			// Extract database ID (e.g., ORA_SALES_HOST -> SALES)
-			remaining := strings.TrimPrefix(key, "ORA_")
-			parts := strings.Split(remaining, "_")
-			if len(parts) >= 2 {
-				// Database ID is everything except the last part
-				dbID := strings.Join(parts[:len(parts)-1], "_")
-				foundIDs[dbID] = true
-			}
-		}
-	}
-
-	// Second pass: build configs for each database ID
-	for dbID := range foundIDs {
-		// Try full DSN first (easier)
-		dsnKey := fmt.Sprintf("ORA_%s_DSN", dbID)
-		if dsn := os.Getenv(dsnKey); dsn != "" {
-			// For DSN string, we just store it and use it directly
-			// You could parse it if needed, but simpler to just use it
-			slog.Info("found database DSN", "database_id", dbID)
-			configs[strings.ToLower(dbID)] = DatabaseConfig{
-				ID: strings.ToLower(dbID),
-				// Store as a marker that we should use the DSN directly
-			}
-			continue
+		db, exists := app.dbs[dbID]
+		if !exists {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "Database Not Found",
+				"message": "The specified database does not exist or is not configured",
+				"code":    "DB_NOT_FOUND",
+			})
+			return
 		}
 
-		// Try component-based config
-		hostKey := fmt.Sprintf("ORA_%s_HOST", dbID)
-		portKey := fmt.Sprintf("ORA_%s_PORT", dbID)
-		sidKey := fmt.Sprintf("ORA_%s_SID", dbID)
-		userKey := fmt.Sprintf("ORA_%s_USER", dbID)
-		passKey := fmt.Sprintf("ORA_%s_PASSWORD", dbID)
-
-		host := os.Getenv(hostKey)
-		portStr := os.Getenv(portKey)
-		sid := os.Getenv(sidKey)
-		user := os.Getenv(userKey)
-		password := os.Getenv(passKey)
-
-		// Validate required fields
-		if host == "" || sid == "" || user == "" || password == "" {
-			slog.Warn("incomplete database configuration, skipping",
-				"database_id", dbID,
-				"has_host", host != "",
-				"has_sid", sid != "",
-				"has_user", user != "",
-				"has_password", password != "")
-			continue
-		}
-
-		port := 1521 // default Oracle port
-		if portStr != "" {
-			if p, err := strconv.Atoi(portStr); err == nil {
-				port = p
-			}
-		}
-
-		configs[strings.ToLower(dbID)] = DatabaseConfig{
-			ID:       strings.ToLower(dbID),
-			Host:     host,
-			Port:     port,
-			SID:      sid,
-			User:     user,
-			Password: password,
-		}
-
-		slog.Info("found database configuration",
-			"database_id", dbID,
-			"host", host,
-			"port", port,
-			"sid", sid)
-	}
-
-	return configs
-}
-
-// Alternative: load from DSN strings only (simpler)
-// func loadDatabaseConfigsFromDSN() map[string]string {
-// 	dsns := make(map[string]string)
-
-// 	for _, env := range os.Environ() {
-// 		parts := strings.SplitN(env, "=", 2)
-// 		if len(parts) != 2 {
-// 			continue
-// 		}
-// 		key := parts[0]
-// 		value := parts[1]
-
-// 		if strings.HasPrefix(key, "ORA_") && strings.HasSuffix(key, "_DSN") {
-// 			dbID := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(key, "ORA_"), "_DSN"))
-// 			dsns[dbID] = value
-// 			slog.Info("found database DSN", "database_id", dbID)
-// 		}
-// 	}
-
-// 	return dsns
-// }
-
-func openDatabase(driver, dsn, databaseId string) (*sql.DB, error) {
-	const maxRetries = 3
-	const retryDelay = 2 * time.Second
-
-	var db *sql.DB
-	var err error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		db, err = sql.Open(driver, dsn)
-		if err != nil {
-			slog.Warn("failed to open database",
-				"database", databaseId,
-				"attempt", attempt,
-				"error", err)
-
-			if attempt < maxRetries {
-				time.Sleep(retryDelay)
-				continue
-			}
-			return nil, err
-		}
-
-		// Configure connection pool for production
-		db.SetMaxOpenConns(25)                 // Max concurrent connections
-		db.SetMaxIdleConns(5)                  // Idle connections to keep
-		db.SetConnMaxLifetime(5 * time.Minute) // Recycle connections
-		db.SetConnMaxIdleTime(2 * time.Minute) // Close idle connections
-
-		// Verify connection
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Test database connection before proceeding
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
-		err = db.PingContext(ctx)
-		if err != nil {
-			slog.Warn("failed to ping database",
-				"database", databaseId,
-				"attempt", attempt,
+		if err := db.PingContext(ctx); err != nil {
+			slog.Warn("database unavailable during request",
+				"database_id", dbID,
 				"error", err)
 
-			db.Close()
-
-			if attempt < maxRetries {
-				time.Sleep(retryDelay)
-				continue
-			}
-			return nil, err
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":   "Database Unavailable",
+				"message": "The database is temporarily unavailable. Please try again later.",
+				"code":    "DB_UNAVAILABLE",
+			})
+			return
 		}
 
-		slog.Info("database connection verified",
-			"database", databaseId,
-			"attempt", attempt)
-		return db, nil
-	}
+		// Add both database connection and ID to context
+		ctx = context.WithValue(r.Context(), dbContextKey, db)
+		ctx = context.WithValue(ctx, dbIDContextKey, dbID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
-	return nil, err
+// Handler: Create transaction
+func (app *application) createTransactionHandler(w http.ResponseWriter, r *http.Request) {
+	db := r.Context().Value(dbContextKey).(*sql.DB)
+	dbID := r.Context().Value(dbIDContextKey).(string)
+
+	cryptoRepo := repo.New(db)
+	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoRepo)
+
+	slog.Info("creating transaction", "database_id", dbID)
+	cryptoHandler.CreateTransaction(w, r)
+}
+
+// Handler: List transactions
+func (app *application) listTransactionsHandler(w http.ResponseWriter, r *http.Request) {
+	db := r.Context().Value(dbContextKey).(*sql.DB)
+	dbID := r.Context().Value(dbIDContextKey).(string)
+
+	cryptoRepo := repo.New(db)
+	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoRepo)
+
+	slog.Info("listing transactions", "database_id", dbID)
+	cryptoHandler.ListTransactions(w, r)
+}
+
+// Handler: Get single transaction (example of additional endpoint)
+func (app *application) getTransactionHandler(w http.ResponseWriter, r *http.Request) {
+	// Example implementation
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	json.NewEncoder(w).Encode(map[string]string{
+		"error": "Not implemented yet",
+	})
 }
