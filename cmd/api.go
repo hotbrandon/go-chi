@@ -176,8 +176,8 @@ func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dbID := strings.ToLower(chi.URLParam(r, "database_id"))
 
-		db, exists := app.dbs[dbID]
-		if !exists {
+		// Check if database config exists
+		if _, exists := app.cfg.databases[dbID]; !exists {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -188,11 +188,9 @@ func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Test database connection before proceeding
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-
-		if err := db.PingContext(ctx); err != nil {
+		// Get or connect to database (lazy connection)
+		db, err := app.getOrConnectDB(dbID)
+		if err != nil {
 			slog.Warn("database unavailable during request",
 				"database_id", dbID,
 				"error", err)
@@ -208,7 +206,7 @@ func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Add both database connection and ID to context
-		ctx = context.WithValue(r.Context(), dbContextKey, db)
+		ctx := context.WithValue(r.Context(), dbContextKey, db)
 		ctx = context.WithValue(ctx, dbIDContextKey, dbID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

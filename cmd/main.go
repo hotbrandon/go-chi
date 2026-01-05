@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -41,8 +42,11 @@ type config struct {
 }
 
 type application struct {
-	cfg config
-	dbs map[string]*sql.DB
+	cfg            config
+	dbs            map[string]*sql.DB
+	dbMutex        sync.RWMutex
+	failedDBs      map[string]time.Time // Track when DB last failed
+	failedDBsMutex sync.RWMutex
 }
 
 func main() {
@@ -71,7 +75,8 @@ func main() {
 			appAddr:   appAddrEnv,
 			databases: dbConfigs,
 		},
-		dbs: make(map[string]*sql.DB),
+		dbs:       make(map[string]*sql.DB),
+		failedDBs: make(map[string]time.Time),
 	}
 
 	// Connect to all configured databases
@@ -97,14 +102,19 @@ func main() {
 			"sid", dbConfig.SID)
 	}
 
-	if successCount == 0 {
-		slog.Error("no databases available, cannot start server")
-		os.Exit(1)
-	}
-
 	slog.Info("database initialization complete",
 		"configured", len(dbConfigs),
 		"connected", successCount)
+
+	// Add cleanup here, BEFORE app.serve()
+	defer func() {
+		app.dbMutex.Lock()
+		defer app.dbMutex.Unlock()
+		for dbID, db := range app.dbs {
+			slog.Info("closing database connection", "database_id", dbID)
+			db.Close()
+		}
+	}()
 
 	if err := app.serve(); err != nil {
 		slog.Error("server failed", "error", err)
@@ -283,4 +293,85 @@ func openDatabase(driver, dsn, databaseId string) (*sql.DB, error) {
 	}
 
 	return nil, err
+}
+
+// Add lazy connection method
+// attemptConnection tries to connect to a database if not already connected
+// Returns the connection or nil if it fails (with appropriate backoff)
+func (app *application) getOrConnectDB(dbID string) (*sql.DB, error) {
+	// First, check if we already have a healthy connection
+	app.dbMutex.RLock()
+	db, exists := app.dbs[dbID]
+	app.dbMutex.RUnlock()
+
+	if exists {
+		// Quick ping to verify it's still healthy
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := db.PingContext(ctx)
+		cancel()
+
+		if err == nil {
+			return db, nil // Connection is good
+		}
+
+		// Connection is bad, remove it
+		slog.Warn("existing database connection is unhealthy, will reconnect",
+			"database_id", dbID,
+			"error", err)
+
+		app.dbMutex.Lock()
+		delete(app.dbs, dbID)
+		db.Close()
+		app.dbMutex.Unlock()
+	}
+
+	// Check if we recently failed (implement backoff)
+	app.failedDBsMutex.RLock()
+	lastFailed, recentlyFailed := app.failedDBs[dbID]
+	app.failedDBsMutex.RUnlock()
+
+	if recentlyFailed {
+		// Don't retry for 30 seconds after last failure
+		if time.Since(lastFailed) < 30*time.Second {
+			return nil, fmt.Errorf("database recently failed, retry after %v",
+				30*time.Second-time.Since(lastFailed))
+		}
+	}
+
+	// Get the config for this database
+	dbConfig, exists := app.cfg.databases[dbID]
+	if !exists {
+		return nil, fmt.Errorf("database configuration not found")
+	}
+
+	// Attempt to connect
+	slog.Info("attempting to connect to database", "database_id", dbID)
+	dsn := dbConfig.BuildDSN()
+	db, err := openDatabase("oracle", dsn, dbID)
+
+	if err != nil {
+		// Mark as failed
+		app.failedDBsMutex.Lock()
+		app.failedDBs[dbID] = time.Now()
+		app.failedDBsMutex.Unlock()
+
+		slog.Warn("failed to connect to database",
+			"database_id", dbID,
+			"error", err)
+		return nil, err
+	}
+
+	// Success! Store the connection and clear failure record
+	app.dbMutex.Lock()
+	app.dbs[dbID] = db
+	app.dbMutex.Unlock()
+
+	app.failedDBsMutex.Lock()
+	delete(app.failedDBs, dbID)
+	app.failedDBsMutex.Unlock()
+
+	slog.Info("database connected successfully via lazy connection",
+		"database_id", dbID)
+
+	return db, nil
 }
