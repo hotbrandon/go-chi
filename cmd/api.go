@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -11,14 +10,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	cryptocurrency "github.com/hotbrandon/go-chi/internal/crypto"
+	"github.com/hotbrandon/go-chi/internal/handlers"
 	"github.com/hotbrandon/go-chi/internal/repo"
 )
-
-type contextKey string
-
-const dbContextKey contextKey = "database"
-const dbIDContextKey contextKey = "database_id"
 
 func (app *application) mount() http.Handler {
 	r := chi.NewRouter()
@@ -30,28 +24,31 @@ func (app *application) mount() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	// Health checks (no authentication needed)
+	// Health checks (app-specific, stay as methods)
 	r.Get("/health", app.healthCheckHandler)
 	r.Get("/health/readiness", app.readinessCheckHandler)
-
-	// List available databases (useful for frontends)
 	r.Get("/databases", app.listDatabasesHandler)
 
-	// API routes - database ID in path
+	// Initialize domain handlers
+	cryptoHandlers := handlers.NewCryptoHandlers()
+
+	// API routes
 	r.Route("/api/{database_id}", func(r chi.Router) {
 		r.Use(app.databaseMiddleware)
 
-		// Crypto/transaction endpoints
+		// Crypto endpoints
 		r.Route("/crypto", func(r chi.Router) {
-			r.Get("/transactions", app.listTransactionsHandler)
-			r.Post("/transactions", app.createTransactionHandler)
-			r.Get("/transactions/{id}", app.getTransactionHandler)
-			// Add more as needed
+			r.Get("/transactions", cryptoHandlers.ListTransactions)
+			r.Post("/transactions", cryptoHandlers.CreateTransaction)
+			r.Get("/transactions/{id}", cryptoHandlers.GetTransaction)
 		})
 
-		// You can add other resource types here
-		// r.Route("/users", func(r chi.Router) { ... })
-		// r.Route("/reports", func(r chi.Router) { ... })
+		// Future: Add more domains as needed
+		// usersHandlers := handlers.NewUsersHandlers(slog.Default())
+		// r.Route("/users", func(r chi.Router) {
+		//     r.Get("/", usersHandlers.List)
+		//     r.Post("/", usersHandlers.Create)
+		// })
 	})
 
 	return r
@@ -72,7 +69,7 @@ func (app *application) serve() error {
 	return srv.ListenAndServe()
 }
 
-// Health check - simple liveness probe
+// Health checks remain as application methods (they're infrastructure concerns)
 func (app *application) healthCheckHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -171,12 +168,11 @@ func (app *application) listDatabasesHandler(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// Middleware: Inject database connection into request context
+// Middleware injects repository instead of raw DB
 func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		dbID := strings.ToLower(chi.URLParam(r, "database_id"))
 
-		// Check if database config exists
 		if _, exists := app.cfg.databases[dbID]; !exists {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
@@ -188,7 +184,6 @@ func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Get or connect to database (lazy connection)
 		db, err := app.getOrConnectDB(dbID)
 		if err != nil {
 			slog.Warn("database unavailable during request",
@@ -205,43 +200,11 @@ func (app *application) databaseMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Add both database connection and ID to context
-		ctx := context.WithValue(r.Context(), dbContextKey, db)
-		ctx = context.WithValue(ctx, dbIDContextKey, dbID)
+		// Inject repository (not raw DB)
+		repository := repo.New(db)
+		ctx := context.WithValue(r.Context(), handlers.RepoContextKey, repository)
+		ctx = context.WithValue(ctx, handlers.DBIDContextKey, dbID)
+
 		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// Handler: Create transaction
-func (app *application) createTransactionHandler(w http.ResponseWriter, r *http.Request) {
-	db := r.Context().Value(dbContextKey).(*sql.DB)
-	dbID := r.Context().Value(dbIDContextKey).(string)
-
-	cryptoRepo := repo.New(db)
-	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoRepo)
-
-	slog.Info("creating transaction", "database_id", dbID)
-	cryptoHandler.CreateTransaction(w, r)
-}
-
-// Handler: List transactions
-func (app *application) listTransactionsHandler(w http.ResponseWriter, r *http.Request) {
-	db := r.Context().Value(dbContextKey).(*sql.DB)
-	dbID := r.Context().Value(dbIDContextKey).(string)
-
-	cryptoRepo := repo.New(db)
-	cryptoHandler := cryptocurrency.NewCryptoHandler(cryptoRepo)
-
-	slog.Info("listing transactions", "database_id", dbID)
-	cryptoHandler.ListTransactions(w, r)
-}
-
-// Handler: Get single transaction (example of additional endpoint)
-func (app *application) getTransactionHandler(w http.ResponseWriter, r *http.Request) {
-	// Example implementation
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	json.NewEncoder(w).Encode(map[string]string{
-		"error": "Not implemented yet",
 	})
 }

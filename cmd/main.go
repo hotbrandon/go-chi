@@ -36,6 +36,7 @@ func (dc DatabaseConfig) BuildDSN() string {
 		dc.SID)
 }
 
+// aaplication config
 type config struct {
 	appAddr   string
 	databases map[string]DatabaseConfig
@@ -245,7 +246,7 @@ func openDatabase(driver, dsn, databaseId string) (*sql.DB, error) {
 	}
 
 	// Configure connection pool for production
-	db.SetMaxOpenConns(25)                 // Max concurrent connections
+	db.SetMaxOpenConns(5)                  // Max concurrent connections
 	db.SetMaxIdleConns(5)                  // Idle connections to keep
 	db.SetConnMaxLifetime(5 * time.Minute) // Recycle connections
 	db.SetConnMaxIdleTime(2 * time.Minute) // Close idle connections
@@ -276,8 +277,8 @@ func (app *application) getOrConnectDB(dbID string) (*sql.DB, error) {
 	if exists {
 		// Quick ping to verify it's still healthy
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		err := db.PingContext(ctx)
-		cancel()
+		err := db.PingContext(ctx) // blocks here, PingContext is synchronous
+		defer cancel()
 
 		if err == nil {
 			return db, nil // Connection is good

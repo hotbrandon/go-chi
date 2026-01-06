@@ -4,10 +4,6 @@ import (
 	"context"
 )
 
-// type CryptoRepository interface {
-// 	ListTransactions(ctx context.Context) ([]Transaction, error)
-// }
-
 func (r *Repository) ListTransactions(ctx context.Context, page, pageSize int) ([]Transaction, error) {
 	var transactions []Transaction
 
